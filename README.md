@@ -12,12 +12,23 @@ Hermes model-provider plugin for a local or remote LiteLLM proxy.
 
 ## Install
 
-Copy this directory to your Hermes model provider plugins directory:
+Hermes discovers model-provider plugins from:
+
+```bash
+~/.hermes/plugins/model-providers/<provider-name>/
+```
+
+Install this provider as `litellm`:
 
 ```bash
 mkdir -p ~/.hermes/plugins/model-providers/litellm
 cp __init__.py plugin.yaml ~/.hermes/plugins/model-providers/litellm/
+hermes gateway restart
 ```
+
+`hermes plugins install owner/repo` is the standard installer for general Hermes
+plugins. Model-provider discovery is path-based, so this provider currently uses
+the model-provider directory directly.
 
 Configure Hermes to use LiteLLM:
 
@@ -51,6 +62,21 @@ Tool-call smoke test:
 ```bash
 hermes --provider litellm -m glm-5.1 -t terminal -z "Use terminal to run printf ping, then answer with the command output only"
 ```
+
+## Development
+
+Keep this repository as the source of truth, then deploy to a remote Hermes host
+only for testing:
+
+```bash
+make check
+make deploy REMOTE=xz@100.65.231.22
+make restart REMOTE=xz@100.65.231.22
+make test REMOTE=xz@100.65.231.22 MODEL=glm-5.1
+```
+
+The deploy target copies only `__init__.py` and `plugin.yaml` into the remote
+model-provider directory and clears the remote bytecode cache.
 
 ## Notes
 
