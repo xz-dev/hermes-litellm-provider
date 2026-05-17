@@ -1,0 +1,5 @@
+name: litellm-provider
+kind: model-provider
+version: 1.0.0
+description: LiteLLM proxy provider profile with model-info discovery and reasoning_effort passthrough
+author: xz
