@@ -13,7 +13,6 @@ This profile keeps Hermes aligned with OpenCode's LiteLLM model discovery:
 from __future__ import annotations
 
 import json
-import os
 import time
 import urllib.error
 import urllib.request
@@ -51,13 +50,29 @@ class LiteLLMProfile(ProviderProfile):
         name = model_name.lower()
         return any(token in name for token in ("embedding", "embed", "dall-e", "flux", "sdxl"))
 
-    def _base_url(self) -> str:
-        return (
-            os.getenv("LITELLM_BASE_URL")
-            or self.base_url
-            or os.getenv("OPENAI_BASE_URL")
-            or ""
-        ).rstrip("/")
+    def _resolved_credentials(self) -> tuple[str | None, str | None]:
+        """Read credentials through Hermes' provider credential resolver."""
+        try:
+            from hermes_cli.auth import resolve_api_key_provider_credentials
+
+            creds = resolve_api_key_provider_credentials(self.name)
+        except Exception:
+            return None, None
+        api_key = str(creds.get("api_key") or "").strip() or None
+        base_url = str(creds.get("base_url") or "").strip() or None
+        return api_key, base_url
+
+    def _api_key(self, api_key: str | None = None) -> str | None:
+        if api_key:
+            return api_key
+        resolved_api_key, _ = self._resolved_credentials()
+        return resolved_api_key
+
+    def _base_url(self, base_url: str | None = None) -> str:
+        if base_url:
+            return base_url.rstrip("/")
+        _, resolved_base_url = self._resolved_credentials()
+        return (resolved_base_url or self.base_url or "").rstrip("/")
 
     def _request_json(self, url: str, api_key: str | None, timeout: float) -> Any | None:
         req = urllib.request.Request(url)
@@ -76,13 +91,14 @@ class LiteLLMProfile(ProviderProfile):
         self,
         *,
         api_key: str | None = None,
+        base_url: str | None = None,
         timeout: float = 8.0,
     ) -> list[dict[str, Any]]:
-        api_key = api_key or os.getenv("LITELLM_API_KEY") or None
-        base_url = self._base_url()
-        if not base_url:
+        resolved_api_key = self._api_key(api_key)
+        resolved_base_url = self._base_url(base_url)
+        if not resolved_base_url:
             return []
-        cache_key = f"{base_url}|{bool(api_key)}"
+        cache_key = resolved_base_url
         now = time.time()
         if (
             self._model_info_cache
@@ -91,10 +107,10 @@ class LiteLLMProfile(ProviderProfile):
         ):
             return list(self._model_info_cache.get("entries") or [])
 
-        server_url = base_url[:-3].rstrip("/") if base_url.endswith("/v1") else base_url
+        server_url = resolved_base_url[:-3].rstrip("/") if resolved_base_url.endswith("/v1") else resolved_base_url
         entries: list[dict[str, Any]] = []
         for path in ("/v1/model/info", "/model/info"):
-            payload = self._request_json(f"{server_url}{path}", api_key, timeout)
+            payload = self._request_json(f"{server_url}{path}", resolved_api_key, timeout)
             data = payload.get("data") if isinstance(payload, dict) else None
             if isinstance(data, list):
                 entries = [entry for entry in data if isinstance(entry, dict)]
@@ -164,25 +180,26 @@ class LiteLLMProfile(ProviderProfile):
         model: str | None,
         *,
         api_key: str | None = None,
+        base_url: str | None = None,
     ) -> dict[str, Any] | None:
         if not model:
             return None
-        entries = self._fetch_model_info_entries(api_key=api_key, timeout=5.0)
+        entries = self._fetch_model_info_entries(api_key=api_key, base_url=base_url, timeout=5.0)
         if not entries:
             return None
         info_map = self._build_model_info_map(entries)
         return info_map.get(model) or info_map.get(model.lower())
 
-    def _supports_reasoning_effort(self, model: str | None, api_key: str | None) -> bool:
-        entry = self._model_info_for(model, api_key=api_key)
+    def _supports_reasoning_effort(self, model: str | None, api_key: str | None, base_url: str | None) -> bool:
+        entry = self._model_info_for(model, api_key=api_key, base_url=base_url)
         info = entry.get("model_info") if isinstance(entry, dict) and isinstance(entry.get("model_info"), dict) else None
         if not info:
             return False
         params = info.get("supported_openai_params")
         return info.get("supports_reasoning") is True and isinstance(params, list) and "reasoning_effort" in params
 
-    def _effort_supported(self, effort: str, model: str | None, api_key: str | None) -> bool:
-        entry = self._model_info_for(model, api_key=api_key)
+    def _effort_supported(self, effort: str, model: str | None, api_key: str | None, base_url: str | None) -> bool:
+        entry = self._model_info_for(model, api_key=api_key, base_url=base_url)
         info = entry.get("model_info") if isinstance(entry, dict) and isinstance(entry.get("model_info"), dict) else None
         if not info:
             return False
@@ -204,8 +221,9 @@ class LiteLLMProfile(ProviderProfile):
         if not reasoning_config or not isinstance(reasoning_config, dict):
             return {}, {}
 
-        api_key = os.getenv("LITELLM_API_KEY") or None
-        if not self._supports_reasoning_effort(model, api_key):
+        api_key = self._api_key()
+        base_url = context.get("base_url") if isinstance(context.get("base_url"), str) else None
+        if not self._supports_reasoning_effort(model, api_key, base_url):
             return {}, {}
 
         enabled = reasoning_config.get("enabled", True)
@@ -215,7 +233,7 @@ class LiteLLMProfile(ProviderProfile):
             effort_raw = "none"
 
         effort = self._EFFORT_MAP.get(effort_raw, "medium")
-        if not self._effort_supported(effort, model, api_key):
+        if not self._effort_supported(effort, model, api_key, base_url):
             if effort == "none":
                 return {}, {}
             effort = "medium"
@@ -233,8 +251,9 @@ class LiteLLMProfile(ProviderProfile):
         Prefer ``/v1/model/info`` so non-chat models can be skipped. Fall back to
         OpenAI-compatible ``/v1/models`` when LiteLLM metadata is unavailable.
         """
-        api_key = api_key or os.getenv("LITELLM_API_KEY") or None
-        entries = self._fetch_model_info_entries(api_key=api_key, timeout=timeout)
+        api_key = self._api_key(api_key)
+        base_url = self._base_url()
+        entries = self._fetch_model_info_entries(api_key=api_key, base_url=base_url, timeout=timeout)
         if entries:
             models: list[str] = []
             seen: set[str] = set()
@@ -254,7 +273,6 @@ class LiteLLMProfile(ProviderProfile):
                     models.append(model_name)
             return models or None
 
-        base_url = self._base_url()
         if not base_url:
             return None
         url = (self.models_url or "").strip() or f"{base_url.rstrip('/')}/models"
@@ -278,7 +296,7 @@ litellm = LiteLLMProfile(
     display_name="LiteLLM Proxy",
     description="LiteLLM — unified API proxy for 100+ LLM providers",
     signup_url="https://docs.litellm.ai/docs/",
-    base_url=os.getenv("LITELLM_BASE_URL", "http://127.0.0.1:4000/v1"),
+    base_url="http://127.0.0.1:4000/v1",
     env_vars=("LITELLM_API_KEY",),
     supports_health_check=False,
     default_aux_model="",

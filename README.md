@@ -28,14 +28,17 @@ model:
   base_url: http://127.0.0.1:4000/v1
 ```
 
-Set environment variables as needed:
+Configure credentials with Hermes' normal provider credential flow. The plugin
+declares `LITELLM_API_KEY` as its provider key name, but reads it through Hermes'
+credential resolver instead of calling `os.getenv()` directly.
 
 ```bash
-export LITELLM_API_KEY=your-proxy-key
-export LITELLM_BASE_URL=http://127.0.0.1:4000/v1
+hermes auth add litellm
 ```
 
-`LITELLM_BASE_URL` is optional. If unset, the plugin defaults to `http://127.0.0.1:4000/v1`.
+Hermes environment-based credentials still work if your Hermes setup already
+uses `.env`, because Hermes' resolver handles that layer. The plugin itself
+defaults to `http://127.0.0.1:4000/v1` when no provider base URL is resolved.
 
 ## Test
 
