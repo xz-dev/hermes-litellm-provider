@@ -12,7 +12,9 @@ This profile keeps Hermes aligned with OpenCode's LiteLLM model discovery:
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import time
 import urllib.error
 import urllib.request
@@ -23,6 +25,7 @@ from providers.base import ProviderProfile
 
 
 _CACHE_TTL_SECONDS = 300
+logger = logging.getLogger(__name__)
 
 
 class LiteLLMProfile(ProviderProfile):
@@ -56,7 +59,8 @@ class LiteLLMProfile(ProviderProfile):
             from hermes_cli.auth import resolve_api_key_provider_credentials
 
             creds = resolve_api_key_provider_credentials(self.name)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Could not resolve LiteLLM credentials through Hermes: %s", exc)
             return None, None
         api_key = str(creds.get("api_key") or "").strip() or None
         base_url = str(creds.get("base_url") or "").strip() or None
@@ -87,6 +91,13 @@ class LiteLLMProfile(ProviderProfile):
         except (OSError, urllib.error.URLError, json.JSONDecodeError):
             return None
 
+    @staticmethod
+    def _cache_key(base_url: str, api_key: str | None) -> str:
+        if not api_key:
+            return base_url
+        fingerprint = hashlib.sha256(api_key.encode()).hexdigest()[:12]
+        return f"{base_url}|{fingerprint}"
+
     def _fetch_model_info_entries(
         self,
         *,
@@ -98,7 +109,7 @@ class LiteLLMProfile(ProviderProfile):
         resolved_base_url = self._base_url(base_url)
         if not resolved_base_url:
             return []
-        cache_key = resolved_base_url
+        cache_key = self._cache_key(resolved_base_url, resolved_api_key)
         now = time.time()
         if (
             self._model_info_cache

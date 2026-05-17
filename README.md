@@ -54,6 +54,28 @@ hermes --provider litellm -m glm-5.1 -t terminal -z "Use terminal to run printf 
 
 ## Notes
 
+### Context Length
+
+Hermes' current `ProviderProfile.fetch_models()` interface only returns model
+IDs (`list[str]`). This plugin can use `/v1/model/info` to improve model
+matching and filtering, but it cannot return `max_input_tokens` or context
+length metadata back through that interface.
+
+Context length should be resolved in Hermes core's model metadata layer. A good
+resolution order is:
+
+1. Explicit user config.
+2. LiteLLM `/v1/model/info` fields such as `max_input_tokens` or `max_tokens`.
+3. `models.dev`, using `litellm_params.model` when available.
+4. Provider-specific defaults.
+5. Hermes fallback default.
+
+This keeps the plugin focused on provider registration, model discovery, and
+request-time compatibility while leaving context sizing to the component that
+can actually apply it.
+
+### Ollama Cloud Routing
+
 For Ollama Cloud behind LiteLLM, prefer an OpenAI-compatible route:
 
 ```yaml
