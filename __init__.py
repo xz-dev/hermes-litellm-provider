@@ -201,24 +201,63 @@ class LiteLLMProfile(ProviderProfile):
         info_map = self._build_model_info_map(entries)
         return info_map.get(model) or info_map.get(model.lower())
 
+    @staticmethod
+    def _litellm_supported_openai_params(model: str | None) -> list[str] | None:
+        """Ask LiteLLM's provider registry which OpenAI params this routed model accepts."""
+        if not model:
+            return None
+        try:
+            import litellm  # type: ignore
+
+            params = litellm.get_supported_openai_params(model=model)
+        except Exception as exc:
+            logger.debug("LiteLLM could not resolve supported params for %s: %s", model, exc)
+            return None
+        return params if isinstance(params, list) else None
+
+    def _routed_model_for_entry(self, entry: dict[str, Any] | None) -> str | None:
+        params = entry.get("litellm_params") if isinstance(entry, dict) and isinstance(entry.get("litellm_params"), dict) else None
+        routed_model = params.get("model") if isinstance(params, dict) else None
+        return routed_model if isinstance(routed_model, str) and routed_model else None
+
+    @staticmethod
+    def _has_reasoning_effort_param(params: Any) -> bool:
+        return isinstance(params, list) and "reasoning_effort" in params
+
     def _supports_reasoning_effort(self, model: str | None, api_key: str | None, base_url: str | None) -> bool:
         entry = self._model_info_for(model, api_key=api_key, base_url=base_url)
         info = entry.get("model_info") if isinstance(entry, dict) and isinstance(entry.get("model_info"), dict) else None
         if not info:
             return False
+
         params = info.get("supported_openai_params")
-        return info.get("supports_reasoning") is True and isinstance(params, list) and "reasoning_effort" in params
+        if info.get("supports_reasoning") is True and self._has_reasoning_effort_param(params):
+            return True
+
+        # For wildcard LiteLLM proxy routes, /v1/model/info often contains only
+        # route metadata (id/db_model) and omits model capability fields. In that
+        # case, defer to LiteLLM's own provider registry for the concrete routed
+        # model. If LiteLLM cannot resolve the provider/model, stay conservative
+        # and do not send reasoning_effort.
+        if "supports_reasoning" in info or self._has_reasoning_effort_param(params):
+            return False
+        routed_model = self._routed_model_for_entry(entry)
+        routed_params = self._litellm_supported_openai_params(routed_model)
+        return self._has_reasoning_effort_param(routed_params)
 
     def _effort_supported(self, effort: str, model: str | None, api_key: str | None, base_url: str | None) -> bool:
         entry = self._model_info_for(model, api_key=api_key, base_url=base_url)
         info = entry.get("model_info") if isinstance(entry, dict) and isinstance(entry.get("model_info"), dict) else None
         if not info:
             return False
-        if effort == "medium" or effort == "high":
+        if effort in {"medium", "high"}:
             return True
-        if effort == "low":
-            return info.get("supports_low_reasoning_effort") is not False
-        return info.get(f"supports_{effort}_reasoning_effort") is True
+        support_key = f"supports_{effort}_reasoning_effort"
+        if support_key in info:
+            return info.get(support_key) is not False
+        if "supports_reasoning" in info:
+            return False
+        return self._supports_reasoning_effort(model, api_key, base_url)
 
     def build_api_kwargs_extras(
         self,
@@ -238,10 +277,11 @@ class LiteLLMProfile(ProviderProfile):
             return {}, {}
 
         enabled = reasoning_config.get("enabled", True)
+        if enabled is False:
+            return {}, {}
+
         raw_effort = reasoning_config.get("effort") or "medium"
         effort_raw = str(raw_effort).strip().lower()
-        if enabled is False:
-            effort_raw = "none"
 
         effort = self._EFFORT_MAP.get(effort_raw, "medium")
         if not self._effort_supported(effort, model, api_key, base_url):
